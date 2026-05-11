@@ -1,0 +1,26 @@
+# Database
+database.db
+database.db-journal
+database.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Project Specific Exclusions
+main.py
+API drafting.docx
+
+# Editor & OS specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Microsoft Office temporary files
+~$*

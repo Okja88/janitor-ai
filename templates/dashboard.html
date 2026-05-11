@@ -1,0 +1,129 @@
+{% extends "sqladmin/layout.html" %}
+{% block content %}
+<div class="container-fluid">
+    <h2 class="my-4"><i class="fa fa-chart-line"></i> Agentic Performance Dashboard</h2>
+    
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card bg-primary text-white shadow">
+                <div class="card-body">
+                    <h5>Total Issues</h5>
+                    <p class="display-6">{{ kpi.total_issues }}</p>
+                    <small>Total system flags</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-dark text-white shadow">
+                <div class="card-body">
+                    <h5>Automation Rate</h5>
+                    <p class="display-6">{{ kpi.automation_rate }}</p>
+                    <small>AI-Fixed vs Total</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-success text-white shadow">
+                <div class="card-body">
+                    <h5>Verification Rate</h5>
+                    <p class="display-6">{{ kpi.verification_rate }}</p>
+                    <small>Manager Reviewed %</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-secondary text-white shadow">
+                <div class="card-body">
+                    <h5>Avg Cycle Time</h5>
+                    <p class="display-6">{{ kpi.avg_cycle_time }}m</p>
+                    <small>Pending to Reviewed</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-6 mb-4">
+            <div class="card border-warning shadow-sm h-100"> 
+                <div class="card-header bg-warning text-dark">
+                    <strong>1. Clerk Workbasket</strong>
+                </div>
+                <div class="card-body text-center d-flex flex-column justify-content-center">
+                    <p class="text-muted">Items requiring manual rectification</p>
+                    <h2 class="display-4">{{ kpi.clerk_backlog }}</h2>
+                    <p class="mb-0">Status: <code>Pending</code></p>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-6 mb-4">
+            <div class="card border-info shadow-sm h-100"> 
+                <div class="card-header bg-info text-white d-flex justify-content-between align-items-center">
+                    <strong>2. Manager Governance Center</strong>
+                    <span class="badge badge-light text-info">Ready for Review</span>
+                </div>
+                <div class="card-body"> 
+                    <div class="row align-items-center h-100">
+                        <div class="col-sm-6 text-center border-right">
+                            <h2 class="display-4">{{ kpi.verification_queue }}</h2>
+                            <p class="text-muted"><code>AI-Fixed</code> & <code>Rectified</code> items</p>
+                        </div>
+                        <div class="col-sm-6 text-center">
+                            <p>Authorize the next batch of verification</p>
+                            <button onclick="runManagerBatch()" class="btn btn-info btn-lg btn-block">
+                                <i class="fa fa-check-circle"></i> Approve Batch ({{ kpi.verification_queue }})
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-12 text-center">
+            <button onclick="runSystemAudit()" class="btn btn-warning btn-lg">
+                <i class="fa fa-search"></i> Run Full System Audit
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+// 1. We mark the function as async so we can use 'await' inside
+async function runManagerBatch() {
+    try {
+        // 2. 'await' tells the browser to wait for the server to finish the review
+        // Note: 'manager-batch-review' is relative to /admin/dashboard
+        const response = await fetch('manager-batch-review', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            alert("Success: " + result.message);
+            
+            // 3. Reload the page to update the Automation Rate and clear the queue
+            window.location.reload(); 
+        } else {
+            alert("Server Error: " + response.status);
+        }
+    } catch (error) {
+        console.error("Connection failed:", error);
+        alert("Could not reach the server.");
+    }
+}
+
+function runSystemAudit() {
+    fetch('/compliance/run-audit', { method: 'POST' })
+    .then(res => res.json())
+    .then(data => {
+        alert("Audit Complete! Issues found: " + data.issues_logged);
+        location.reload();
+    });
+}
+</script>
+{% endblock %}

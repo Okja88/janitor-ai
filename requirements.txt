@@ -1,0 +1,5 @@
+fastapi==0.136.1
+pydantic==2.13.4
+sqladmin==0.25.0
+SQLAlchemy==2.0.49
+sqlmodel==0.0.38
