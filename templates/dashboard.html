@@ -1,4 +1,55 @@
 {% extends "sqladmin/layout.html" %}
+
+{% block extra_css %}
+    <style>
+    /* 1. Ultra-narrow Sidebar - Set to 120px */
+    .sidebar {
+        width: 120px !important; 
+        min-width: 120px !important;
+        background-color: #1a1d20; 
+    }
+
+    /* 2. Slide all content panels to the left to match 120px */
+    .main-panel, .content-page, #main-content, .wrapper-content {
+        margin-left: 120px !important; 
+        width: calc(100% - 120px) !important;
+    }
+
+    /* 3. Adjust Sidebar Text for the slim bar */
+    .sidebar .nav-link {
+        font-size: 0.8rem; 
+        padding: 10px 5px;
+        text-align: center;
+    }
+
+    /* 4. Table Header & ID styling */
+    .table thead th {
+        white-space: nowrap !important;
+        background-color: #f8f9fa;
+        text-transform: uppercase;
+        font-size: 0.75rem;
+    }
+    
+    /* Highlight the ID and BK_ID keys */
+    td.column-id, td.column-book_id {
+        font-weight: bold;
+        color: #0d6efd;
+    }
+
+    /* 5. Mobile Fix */
+    @media (max-width: 991.98px) {
+        .sidebar {
+            width: 0 !important;
+            min-width: 0 !important;
+        }
+        .main-panel {
+            margin-left: 0 !important;
+            width: 100% !important;
+        }
+    }
+    </style>
+{% endblock %}
+
 {% block content %}
 <div class="container-fluid">
     <h2 class="my-4"><i class="fa fa-chart-line"></i> Agentic Performance Dashboard</h2>

@@ -1,14 +1,29 @@
 Janitor_AI: Orchestrated Data Governance System
+-------------------------------------------------------------------------------
+
+-- Latest Updates (v1.1.0) --
+🚀 Version History
+v1.1.0 — Governance & UI Optimization (Current)
+1) Standardized Agent Naming: Migrated to systematic D_Agent naming (e.g., Dup_D_Agent) to unify audit logs and reduce data entropy.
+
+2) UI Real-Estate Optimization: Hard-coded a 120px sidebar and implemented non-wrapping table headers to maximize horizontal space for data review.
+
+3) Display Logic: Added application-level formatters to standardize timestamps to YYYY-MM-DD HH:MM:SS, ensuring clean visibility regardless of database precision.
+
+4) Governance Fix: Moved from dynamic column rendering to an explicit, governed column_list for consistent operational visibility.
+
+v1.0.0 — MVP Baseline
+1) Architecture Baseline: Implementation of core "Janitor" logic and event-driven compliance hooks.
+
+2) Data Strategy: Established initial 37.5% automated rectification rate for metadata entry errors.
+
+3) Operational Visibility: Basic real-time KPI tracking for system health and intervention backlogs.
+
+-------------------------------------------------------------------------------
 
 -- Project Overview --
 Janitor_AI is a proactive data governance platform built with FastAPI and SQLModel. It serves as a proof-of-concept for an Automated Data Lifecycle, where database integrity is managed by a multi-tiered agent architecture. The system ensures that data is not only stored but is continuously audited and reconciled through a "Human-in-the-Loop" (HITL) workflow.
 
-Current Version: v1.0 (MVP)
-1) Architecture Baseline: Implementation of the core "Janitor" logic and event-driven compliance hooks.
-
-2) Data Strategy: Established a 37.5% automated rectification rate for common data entry errors.
-
-3) Operational Visibility: Real-time KPI tracking for managers to monitor system health and human intervention backlogs.
 
 -------------------------------------------------------------------------------
 -- Project Structure --

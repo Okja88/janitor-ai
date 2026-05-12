@@ -422,7 +422,7 @@ class AuditLog(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     book_id: int
-    agent_name: str = Field(default="System") # e.g., "Compliance_Agent"
+    agent_name: str = Field(default="System") # e.g., "Auto_Compl_Agent"
     action_taken: str # e.g., "Flagged low page count"
     status: str = Field(default="Pending")  # New: Pending, Fixed, or Research_Needed
     
@@ -430,7 +430,7 @@ class AuditLog(SQLModel, table=True):
     created_at: datetime = Field(
         sa_column=Column(
             DateTime(timezone=True), 
-            server_default=func.now() # Sets time on creation
+            server_default=func.now()
         )
     )
 
@@ -438,8 +438,8 @@ class AuditLog(SQLModel, table=True):
     updated_at: datetime = Field(
         sa_column=Column(
             DateTime(timezone=True), 
-            server_default=func.now(), # Sets time on creation
-            onupdate=func.now()        # AUTOMATICALLY updates on every change
+            server_default=func.now(), 
+            onupdate=func.now()
         )
     )
 
@@ -457,7 +457,37 @@ class AuditLogAdmin(ModelView, model=AuditLog):
     Compliance Monitor.
     """
 
-    column_list = "__all__"
+    # Extract all the columns 
+    column_list = [
+        "id",           # The Log Entry ID
+        "book_id",      # The Link to the Book
+        "created_at", 
+        "agent_name", 
+        "action_taken", 
+        "status",
+        "updated_at"
+    ]
+
+    # This renders the date exactly how you want it: YYYY-MM-DD HH:MM:SS and Specific agent names
+    column_formatters = {
+        "created_at": lambda m, a: m.created_at.strftime("%Y-%m-%d %H:%M:%S") if m.created_at else "",
+        "updated_at": lambda m, a: m.updated_at.strftime("%Y-%m-%d %H:%M:%S") if m.updated_at else "",
+        "agent_name": lambda m, a: {
+                                "Dup_D_Agent": "🔍 Duplicate Detector",
+                                "Tit_D_Agent": "✍️ Title Fixer",
+                                "Pag_D_Agent": "📄 Page Auditor"
+                                }.get(m.agent_name, m.agent_name) # Fallback to original if not in map
+    }
+    
+    column_labels = {
+        "id": "ID",             
+        "book_id": "BK_ID",    
+        "created_at": "Created at",
+        "agent_name": "Agent",
+        "action_taken": "Action",
+        "status": "Status",
+        "updated_at": "Updated at"
+    }
     column_default_sort = ("id", True) # Shows newest logs first
 
 
