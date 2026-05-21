@@ -29,7 +29,7 @@ def is_author_name_compliant(name: str) -> bool:
             return False
     return True
 
-# 1. Define the Model 
+# 1. ----- Define the Model ------------------------------------
 class Book(SQLModel, table=True):
     """
     Represents a book entry in the database.
@@ -44,7 +44,7 @@ class Book(SQLModel, table=True):
     publisher: Optional[str] = None
     publication_date: Optional[date] = None
 
-# 2. Setup the Database Engine 
+# 2. ----- Setup the Database Engine ------------------------------------
 # sqlite_url: Specifies the local file destination
 # echo=True: Logs all generated SQL commands to the console for debugging
 sqlite_url = "sqlite:///database.db"
@@ -77,11 +77,17 @@ def on_startup():
 # Helper function to get a database session
 def get_session():
     """
-    Dependency generator for database sessions.
+    Dependency provider for scoped database sessions.
     
-    Yields a new SQLModel Session and ensures it is properly closed 
-    after the request is processed, using a context manager for 
-    resource safety.
+    This engine initialization utility handles connection resource provisioning:
+    1. Session Instantiation: Opens a fresh SQLModel session mapped to the SQLite engine.
+    2. Operational Context: Yields operational control back to the invoking FastAPI path dependency injection framework.
+    3. Automatic Disposal: Guarantees connection cleanup and prevents thread memory leaks via automated context boundary termination.
+
+    This ensures that each separate incoming API transaction isolated on its own HTTP request loop obtains an independent database transaction path, preserving data consistency barriers.
+    
+    Yields:
+        Session: A live, context-closed transaction workspace for executing database operations.
     """
     with Session(engine) as session:
         yield session
@@ -91,90 +97,130 @@ def compliance_monitor(mapper, connection, target):
     """
     SQLAlchemy event listener that validates Book data integrity during save operations.
     
-    This function acts as a 'Pre-Commit Guard'. It intercepts the database session 
-    to perform three primary checks:
-    1. Integrity Check: Ensures titles are not empty.
-    2. Duplicate Detection: Searches for matching Title/Author pairs (case-insensitive).
-    3. Formatting & Logic: Flags non-compliant page counts and incorrect title casing.
+    This interceptor acts as a low-level database engine pre-commit data guardrail:
+    1. Identity Mapping: Inspects engine tracking states to extract verified, integer database primary keys.
+    2. Re-entrancy Management: Queries existing logs to prevent duplicate warning entries from generating during recursive data transformations.
+    3. Multi-Rule Audit Matrix: Scans transaction targets sequentially for non-compliant page configurations, lowercase string structures, and author naming protocols.
+
+    This ensures that database records cannot bypass compliance thresholds regardless of whether data modification is initiated by user endpoints, the admin portal interface, or automated batch processes.
     
-    Detected issues are automatically logged to the AuditLog table for 
-    human or AI review, ensuring a 'Human-in-the-Loop' workflow.
+    Note: Highly critical database failures like empty titles bypass the logging lifecycle and result in immediate execution branch termination.
     """
 
-    # Force the database to assign an ID if it's missing
+    # Robustly extract the real database ID 
+    # even mid-transaction during nested flushes
     state = inspect(target)
-    book_id = target.id or (state.identity[0] if state.identity else None)
-
-    if not book_id:
-        return # Safety break
-
-    # Use connection.execute instead of Session(engine)
-    if not target.title or target.title.strip() == "":
-        connection.execute(
-            AuditLog.__table__.insert().values(
-                book_id=book_id, # USE THE VARIABLE
-                agent_name="Integrity_Guard",
-                action_taken="Missing title detected.",
-                status="Pending",
-                resolved_by="System"
-            )
+    
+    # Force evaluation to explicit base Python integers to avoid matching wrappers
+    if state.identity:
+        book_id = int(state.identity[0])  # Hard primary key from the database row
+    elif target.id is not None:
+        book_id = int(target.id) # Fallback to model property
+    else:
+        book_id = None
+    
+    # 1. RE-ENTRANCY GUARD: Stop double flushes
+    if book_id is not None:
+        stmt_check = select(AuditLog).where(
+            AuditLog.book_id == book_id, 
+            AuditLog.agent_name == "Auto_Compliance_Agent"
         )
-            
+        already_flagged = connection.execute(stmt_check).first()
+        if already_flagged:
+            return  # Stop completely if this book already has an open log!
+
+    # 2. INTEGRITY GUARD: Missing Title
+    if not target.title or target.title.strip() == "":
+        return
+
     # --- RULE 1: DUPLICATE DETECTION ---
-    # Check if another book exists with the same title AND author (ignoring case)
     statement = select(Book).where(
         func.lower(Book.title) == func.lower(target.title or ""), 
-        func.lower(Book.author) == func.lower(target.author or ""),
-        Book.id != book_id  # Ensure we aren't comparing the book to itself
+        func.lower(Book.author) == func.lower(target.author or "")
     )
-    result = connection.execute(statement).first()
+    all_matches = connection.execute(statement).all()
 
-    if result:
-        # LOG THE DUPLICATE
+    is_genuine_duplicate = False
+    
+    # If the book has a verified identity row in the database table
+    if book_id is not None:
+        for match in all_matches:
+            # Force clean integer casting to guarantee accurate evaluation matrix
+            db_row_id = int(match[0])
+            if db_row_id != book_id:  
+                is_genuine_duplicate = True
+                break
+    else:
+        # If it's a brand new insert and has no ID yet, 
+        # any existing row in the DB means it's a genuine duplicate
+        if len(all_matches) > 0:
+            is_genuine_duplicate = True
+
+    if is_genuine_duplicate:
         connection.execute(
             AuditLog.__table__.insert().values(
-                book_id=book_id,
-                agent_name="Duplicate_Detection_Agent",
-                action_taken=f"CRITICAL: Duplicate found. ID {result[0]} shares this Title/Author.",
-                status="Pending"
+                book_id=book_id if book_id else 0,
+                agent_name="Duplicate_Detector",
+                error_type="duplicate", # Restored mapping column precision
+                action_taken=f"DUPLICATE: Blocked '{target.title}'.",
+                status="Fixed"
             )
         )
+        return
 
-    # Rule 2: Books must have at least 10 pages
+    # --- RULE 2: PAGE COUNT COMPLIANCE ---
     if target.pages < 10:
         connection.execute(
             AuditLog.__table__.insert().values(
-                book_id=book_id,
+                book_id=book_id if book_id else 0,
                 agent_name="Auto_Compliance_Agent",
+                error_type="page_count",
                 action_taken=f"WARNING: '{target.title}' is non-compliant ({target.pages} pages).",
                 status="Pending"
             )
         )
 
-    # RULE 3: Title Case 
-    if target.title and not target.title.istitle():
+    # --- RULE 3: TITLE CASE COMPLIANCE ---
+    words = target.title.strip().split() if target.title else []
+    needs_title_fix = any(w[0].islower() for w in words if w.isalpha()) if words else False
+
+    if needs_title_fix:
         connection.execute(
             AuditLog.__table__.insert().values(
-                book_id=book_id,
+                book_id=book_id if book_id else 0,
                 agent_name="Auto_Compliance_Agent",
+                error_type="title_case",
                 action_taken=f"FORMATTING: Title '{target.title}' is not in Title Case.",
                 status="Pending"
             )
         )
-
-    # RULE 4: Author Name Compliance 
+       
+    # --- RULE 4: Author Name Compliance ---
     if target.author and not is_author_name_compliant(target.author):
-        connection.execute(
-            AuditLog.__table__.insert().values(
-                book_id=book_id,
-                agent_name="Auto_Compliance_Agent",
-                action_taken=f"FORMATTING: Author '{target.author}' has non-compliant casing.",
-                status="Pending",
-                resolved_by="System"
-            )
+        # 1. Define the search query separately
+        stmt = select(AuditLog).where(
+            AuditLog.book_id == book_id, 
+            AuditLog.status == "Pending",
+            AuditLog.action_taken.contains("Author")
         )
+        
+        # 2. Execute and store the result
+        existing_check = connection.execute(stmt).first()
 
-# 3. Updated Routes
+        # 3. Only insert if no pending log was found
+        if not existing_check:
+            connection.execute(
+                AuditLog.__table__.insert().values(
+                    book_id=book_id,
+                    agent_name="Auto_Compliance_Agent",
+                    error_type="author_case",
+                    action_taken=f"FORMATTING: Author '{target.author}' has non-compliant casing.",
+                    status="Pending",
+                    resolved_by="System"
+                )
+            )
+
+# 3. ----- Updated Routes ------------------------------------
 @app.post("/add-book")
 def create_book(book: Book, session: Session = Depends(get_session)):
     """
@@ -234,23 +280,21 @@ def patch_book(book_id: int, book_data: dict, session: Session = Depends(get_ses
     session.refresh(db_book)
     return db_book
 
-# 4. Conceptual logic for the Run Intelligent Check Agent
+# 4. ----- Conceptual logic for the Run Intelligent Check Agent ------------------------------------
 def run_intelligent_check(session, book_data):
     """
-    Orchestrates the intelligent repair and escalation logic (Janitor_AI).
+    Orchestrates the intelligent data repair and structural escalation logic layer.
     
-    This function acts as the 'Service Layer' that processes data flags. It performs 
-    synchronization between memory and disk, then applies a tiered resolution strategy:
-    
-    1. Automated Repair: Automatically fixes formatting (Title Case) and updates 
-       the AuditLog status to 'AI-Fixed'.
-    2. Human Escalation: Identifies critical errors (Missing Title) that require 
-       manual 'Clerk' intervention.
-    3. Collision Detection: Blocks duplicates and logs the event for security KPIs.
+    This script component operates as an analytical backend system coordinator that processes pending exceptions:
+    1. State Synchronization: Flushes memory buffers and expires cache records to ensure exact real-time disk readability.
+    2. Automated Remediation: Rewrites mismatched text variables into proper title case structures and transfers ownership to Janitor_AI.
+    3. Cultural Logic Exception: Capitalizes author profiles according to business naming conventions while explicitly preserving lowercased international naming particles.
+    4. Operational Isolation: Identifies duplicate records or structural gaps, creates system log traces, and flags indicators for separate manual worker analysis.
+
+    This ensures that structural errors capable of automated resolution are handled without human intervention, maintaining a rapid processing throughput and updating analytical logs prior to structural persistence.
     
     Returns:
-        str: A status code ('FIXED', 'CLERK_REQUIRED', 'DUPLICATE', or 'CLEAN') 
-             indicating the outcome of the agent's intervention.
+        str: A resolution status tracking code ('FIXED', 'CLERK_REQUIRED', or 'DUPLICATE') mapping the tracking outcome.
     """
 
     # 4.1 FORCE DATABASE SYNC:
@@ -271,7 +315,8 @@ def run_intelligent_check(session, book_data):
     # 4.3 FORMATTING ISSUE: Not Camel Case (AI Auto-Fix)
     if book_data.title and not book_data.title.istitle():
         old_title = book_data.title
-        book_data.title = book_data.title.title() 
+        # Add .strip() to clean up the edges
+        book_data.title = book_data.title.strip().title() 
         
         # If we found an old 'Pending' log, update it. Otherwise, create a new one.
         log = existing_log if existing_log else AuditLog(book_id=book_data.id)
@@ -334,21 +379,19 @@ def run_intelligent_check(session, book_data):
     # 4.6 DUPLICATE CHECK 
     existing = session.execute(
         select(Book).where(func.lower(Book.title) == book_data.title.lower())
-    ).scalar_one_or_none()
+        ).scalar_one_or_none()
 
-    if existing:
-        # Log the block for the Manager's "Security" KPI
+    if existing and existing.id != book_data.id: # Exclude self-matching check
         new_log = AuditLog(
             book_id=existing.id,
             agent_name="Duplicate_Detector",
+            error_type="duplicate", # Force structural classification 
             action_taken=f"DUPLICATE: Blocked '{book_data.title}'.",
             status="Fixed"
         )
         session.add(new_log)
         session.commit()
         return "DUPLICATE"
-
-    return "CLEAN"
 
 # 5. ----- Create Admin interface ------------------------------------
 # 5.1 Initialise the Admin
@@ -396,20 +439,23 @@ class BookAdmin(ModelView, model=Book):
         """
 
         if is_created:
-            
-            # Re-fetch or refresh the model to ensure the session sees the latest state
-            session.add(model)
+            # Open the session FIRST
             with Session(engine) as session:
-                # Use 'merge' to bring the 'model' object into this new session
-                # This ensures the session 'knows' which book 
-                book_in_session = session.merge(model)
+                try:
+                    # Use 'merge' to bring the 'model' object into this new session
+                    book_in_session = session.merge(model)
 
-                # Trigger Rectify Phase
-                run_intelligent_check(session, book_in_session)
-                session.commit()
+                    # Trigger Rectify Phase
+                    run_intelligent_check(session, book_in_session)
+                    
+                    # Commit the changes made by the intelligent check
+                    session.commit()
+                except Exception as e:
+                    print(f"Janitor Error: {e}")
+                    session.rollback()
 
 # 6. ----- AuditLog Model ------------------------------------
-# 6.1 Add the AuditLog Model for Tracking Agent Actions
+# 6.1 Define the AuditLog Model for Tracking Agent Actions
 class AuditLog(SQLModel, table=True):
     """
     Persistence layer for agentic activity and system governance.
@@ -423,10 +469,11 @@ class AuditLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     book_id: int
     agent_name: str = Field(default="System") # e.g., "Auto_Compl_Agent"
+    error_type: str = Field(default="formatting") # e.g., "page_count", "title_case", "author_case"
     action_taken: str # e.g., "Flagged low page count"
     status: str = Field(default="Pending")  # New: Pending, Fixed, or Research_Needed
     
-    # 6.2 THE BIRTH TIMESTAMP: When the error was first discovered
+    # 6.1.0 THE BIRTH TIMESTAMP: When the error was first discovered
     created_at: datetime = Field(
         sa_column=Column(
             DateTime(timezone=True), 
@@ -434,7 +481,7 @@ class AuditLog(SQLModel, table=True):
         )
     )
 
-    # 6.3 THE RESOLUTION TIMESTAMP: When the status was last changed
+    # 6.1.1 THE RESOLUTION TIMESTAMP: When the status was last changed
     updated_at: datetime = Field(
         sa_column=Column(
             DateTime(timezone=True), 
@@ -443,10 +490,10 @@ class AuditLog(SQLModel, table=True):
         )
     )
 
-    # 6.4 THE IDENTITY FIELD: Who actually performed the final fix
+    # 6.1.2 THE IDENTITY FIELD: Who actually performed the final fix
     resolved_by: Optional[str] = Field(default="System")
 
-# 6.5 Register the AuditLog in SQLAdmin
+# 6.2 Register the AuditLog in SQLAdmin
 class AuditLogAdmin(ModelView, model=AuditLog):
     """
     Administrative interface for system audits and troubleshooting.
@@ -463,6 +510,7 @@ class AuditLogAdmin(ModelView, model=AuditLog):
         "book_id",      # The Link to the Book
         "created_at", 
         "agent_name", 
+        "error_type",
         "action_taken", 
         "status",
         "updated_at"
@@ -491,7 +539,7 @@ class AuditLogAdmin(ModelView, model=AuditLog):
     column_default_sort = ("id", True) # Shows newest logs first
 
 
-# 7. ----- Dashboard Endpoint ------------------------------------
+# 7. ----- Dashboard Endpoint & Interface ------------------------------------
 # 7.1 Define the local template path
 # This gets the folder named 'templates' in the project directory
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -506,19 +554,21 @@ sqladmin_templates = os.path.join(sqladmin_dir, "templates")
 templates = Jinja2Templates(directory=[template_path, sqladmin_templates])
 
 class ManagerDashboardView(BaseView):
-    """
-    Strategic oversight dashboard for monitoring AI and Human workflows.
-    
-    This view aggregates AuditLog data to calculate operational KPIs, 
-    including Automation Rates and Verification progress. It provides 
-    the interface for the 'Manager' role to perform batch approvals of 
-    AI-rectified data entries.
-    """
-
     name = "Manager KPI Dashboard"
     icon = "fa fa-chart-line"
 
-    # 7.4 Add 'async' before 'def'
+    """
+    Aggregates system audit traces to compile operational performance metrics.
+        
+        Calculates real-time KPIs including:
+        - Total structural exceptions identified across active assets.
+        - Automated remediation rate (Janitor_AI footprint over total system flags).
+        - Verification throughput (proportional completion of pending system reviews).
+        
+        Renders calculated values directly to the administrative web template.
+    """
+    
+    # 7.4 Display KPI Dashboard Route
     @expose("/dashboard", methods=["GET"])
     async def display_kpis(self, request: Request):
         """
@@ -529,11 +579,13 @@ class ManagerDashboardView(BaseView):
         2. Computes the 'Automation Rate' by measuring Janitor_AI's total footprint.
         3. Computes the 'Verification Rate' to track human oversight progress.
         4. Injects calculated metrics into the dashboard.html template.
+
+        This ensures that management personnel have absolute visibility into data ingestion compliance rates, outstanding human data entry queues, and overall software exception volume.
         """
 
         with Session(engine) as session:
             all_logs = session.exec(select(AuditLog)).all()
-            total_logs = len(all_logs)
+            total_raw_flags = len(all_logs) # The technical metric
             
             # 7.4.1 New Multi-Tier Orchestrated Status Counts
             status_counts = {
@@ -551,7 +603,7 @@ class ManagerDashboardView(BaseView):
             
             # 7.4.2 Automation Rate Calculation
             # Calculated as: (Everything the Janitor touched / Total logs)
-            auto_val = (status_counts["ai_resolved_count"] / total_logs * 100) if total_logs > 0 else 0
+            auto_val = (status_counts["ai_resolved_count"] / total_raw_flags * 100) if total_raw_flags > 0 else 0
             automation_rate = f"{auto_val:.1f}%"
 
             # 7.4.3 Verification Rate Calculation
@@ -560,14 +612,24 @@ class ManagerDashboardView(BaseView):
             verif_val = (status_counts["manager_reviewed"] / status_counts["ai_resolved_count"] * 100) if status_counts["ai_resolved_count"] > 0 else 0
             final_verification_rate = f"{verif_val:.1f}%"
             
-            # 7.4.4 Pack data for the HTML template
+            # 7.4.4 The business metric: Group by unique book IDs that exist on disk
+            active_book_ids = {log.book_id for log in all_logs if log.status not in ["Reviewed", "Archived_Ghost_Log"]}
+            
+            # Cross-reference against live books to prevent ghost metric inflation
+            live_books_count = 0
+            for b_id in active_book_ids:
+                if session.get(Book, b_id) is not None:
+                    live_books_count += 1
+
+            # Pack data for the HTML template
             kpi_data = {
-                "total_issues": total_logs,
+                "total_issues": live_books_count,  # Strategic: Accurate active broken books count
+                "system_exception_volume": total_raw_flags,  # Technical: Total raw signals processed by agents
                 "automation_rate": automation_rate,
                 "verification_rate": final_verification_rate,
                 "verification_queue": status_counts["ai_auto_fixed"],
                 "clerk_backlog": status_counts["clerk_backlog"],
-                "avg_cycle_time": 1.5  # Placeholder
+                "avg_cycle_time": 0  # Placeholder
             }
 
             return await self.templates.TemplateResponse(
@@ -576,14 +638,18 @@ class ManagerDashboardView(BaseView):
                 {"kpi": kpi_data}
             )
     
+    # 7.5 Manager Batch Review Route
     @expose("/manager-batch-review", methods=["POST"])
     async def manager_batch_review(self, request: Request):
         """
-        Bulk approval endpoint for the 'Human-in-the-Loop' workflow.
+        Bulk approval transaction endpoint for the data reconciliation pipeline.
         
-        Fetches all logs marked as 'AI-Fixed' or 'Rectified' and transitions 
-        them to 'Reviewed' status. This operation finalizes the data entry 
-        lifecycle and updates the corresponding Book records' audit trail.
+        This structural execution pathway finalizes data states by applying verified tracking changes in bulk:
+        1. Automated Log Sweeping: Queries the database repository for any data rows currently matching an 'AI-Fixed' or 'Rectified' status framework.
+        2. State Escalation: Overwrites target status properties to 'Reviewed' and generates fresh transaction timestamps to establish accountability records.
+        3. Target Model Optimization: Iterates across individual linked database items to register tracking revisions alongside verified audit entries.
+
+        This ensures that a clean data lifecycle is enforced, transforming raw data modifications into historical audit history records with one singular application operation.
         """
 
         # USE standard 'with Session'
@@ -611,12 +677,25 @@ class ManagerDashboardView(BaseView):
             session.commit() # NO 'await' here
             return JSONResponse(content={"status": "Success", "message": "Batch Approved"})
 
+    # 7.6 Janitor Cleanup Route
+    @expose("/janitor/cleanup", methods=["POST"]) # SQLAdmin prefixes this with the view's path
+    async def run_janitor_cleanup(self, request: Request):
+        """
+        Custom endpoint to trigger the Section 9 Repair Agent from the Dashboard UI.
+        """
+        with Session(engine) as session:
+            # This calls your existing Section 9 logic
+            stats = run_repair_agent(session) 
+            
+            # Return the results so the JavaScript alert can show them
+            return JSONResponse(content={"status": "success", "data": stats})
+
 # Register the views to appear in the sidebar automatically
 admin.add_view(BookAdmin)
 admin.add_view(AuditLogAdmin)
 admin.add_view(ManagerDashboardView)
 
-# 8. Compliance Agent logic
+# 8. ----- Active Compliance Agent Router ----------------------------
 @app.post("/compliance/run-audit")
 def run_compliance_audit(session: Session = Depends(get_session)):
     """
@@ -654,22 +733,23 @@ def run_compliance_audit(session: Session = Depends(get_session)):
                 new_log = AuditLog(
                     book_id=target.id,
                     agent_name="Manual_Compliance_Agent",
+                    error_type="page_count",
                     action_taken=f"MISSING DATA: '{target.title}' has invalid pages ({target.pages}).",
                     status="Pending"
                 )
                 session.add(new_log)
                 issues_found += 1
     
-        # Check for Rule 1: Title Case (AI-Rectified Step)
-        # Call run_intelligent_check to ensure the status moves to 'AI-Fixed'
-        if target.title and not target.title.istitle():
-            # This triggers the code in Section 4.3 of your main1.py
+        # Check for Rule 2: Title Case (AI-Rectified Step)
+        words = target.title.strip().split() if target.title else []
+        needs_title_fix = any(w[0].islower() for w in words if w.isalpha()) if words else False
+        
+        if needs_title_fix:
             run_intelligent_check(session, target)
             issues_found += 1
 
         # Check for Rule 3: Author Name Compliance in existing records
         if target.author and not is_author_name_compliant(target.author):
-            # This triggers the Janitor_AI repair sequence for old records
             run_intelligent_check(session, target)
             issues_found += 1
             
@@ -677,7 +757,7 @@ def run_compliance_audit(session: Session = Depends(get_session)):
     session.commit() 
     return {"status": "Audit Complete", "issues_logged": issues_found}
 
-# 9. ----- The smart Repair Agent logic ------------------------------------
+# 9. ----- Smart Repair Agent Background Service ------------------------------------
 @app.post("/repair-agent/run")
 def run_repair_agent(session: Session = Depends(get_session)):
     """
@@ -702,7 +782,7 @@ def run_repair_agent(session: Session = Depends(get_session)):
     # 9.2 Fetch logs that are NOT 'Fixed' or 'Resolved_by_User'
     # This targets everything that still needs attention
     statement = select(AuditLog).where(
-        AuditLog.status != "Fixed",
+        AuditLog.status != "Reviewed",
         AuditLog.status != "Resolved_by_User"
     )
     pending_logs = session.exec(statement).all()
@@ -711,54 +791,78 @@ def run_repair_agent(session: Session = Depends(get_session)):
     for log in pending_logs:
         book = session.get(Book, log.book_id)
 
-        # 9.3.1 Handle logs for books that were deleted
+        # 9.3.1 Ghost Log Handling
         if not book:
             log.status = "Archived_Ghost_Log"
-            log.action_taken += " | System: Book no longer exists."
+            current_action = log.action_taken or "Unknown anomaly detected."
+            log.action_taken = f"{current_action} | System: Book no longer exists."
             session.add(log)
+            counts["deleted"] += 1
             continue
 
-        # 9.3.2 CHECK IF IT'S ALREADY FIXED BY USER 
-        # If the log is about pages, but pages are now >= 10
-        is_page_ok = "pages" in log.action_taken.lower() and book.pages >= 10
-        # If the log is about title, but title is now Title Case
-        is_title_ok = "formatting" in log.action_taken.lower() and book.title.istitle()
+        # 9.3.2 DECOUPLED FIELD VERIFICATION Metrics(Using explicit error_type columns)
+        is_page_ok = log.error_type == "page_count" and book.pages >= 10
+        is_title_ok = log.error_type == "title_case" and book.title.strip().istitle()
+        is_author_ok = log.error_type == "author_case" and is_author_name_compliant(book.author)
 
-        if is_page_ok or is_title_ok:
+        if is_page_ok or is_title_ok or is_author_ok:
             log.status = "Resolved_by_User"
-            log.updated_at = datetime.now()
             counts["resolved"] += 1
-            session.add(log) # STICKY: Tells SQLModel to update this row
-            continue  # Moves to the next log so it doesn't try to "Auto-fix"
+            session.add(log)
+            continue  # Exit current item immediately
 
-        # 9.3.4 Handle non-standard logs (Duplicates, etc.)
-        if "duplicate" in log.action_taken.lower():
-            log.status = "Resolved_by_User" # Or "Manual_Review_Required"
+        # 9.3.4 Entity Collision & Duplicate Handling
+        if log.error_type == "duplicate":
+            log.status = "Resolved_by_User" 
             session.add(log)          
+            continue  # ✨ FIXED: This continue stops the duplicate log from falling into formatting repairs!
 
-        # 9.3.5 TRY TO AUTO-REPAIR (If still broken) 
-        if "formatting" in log.action_taken.lower():
-            book.title = book.title.title()
-            log.status = "Fixed"
-            log.action_taken += " | Repair Agent: Auto-corrected title case."
-            session.add(book)
-            counts["fixed"] += 1
+        # 9.3.5 Structural Auto-Remediation Execution Block
+        changed = False
         
-        elif "pages" in log.action_taken.lower():
-            # If it's still broken and don't have the number, flag it
+        # Check error_type OR inspect the action text to prevent stranded logs
+        is_title_issue = log.error_type == "title_case" or "TITLE" in log.action_taken.upper()
+        is_author_issue = log.error_type == "author_case" or "AUTHOR" in log.action_taken.upper()
+
+        if is_title_issue and (not book.title.istitle() or book.title != book.title.strip()):
+            old_title = book.title
+            book.title = book.title.strip().title()
+            log.action_taken = f"AI fixed '{old_title}' to Title Case."
+            changed = True
+
+        if is_author_issue and not is_author_name_compliant(book.author):
+            old_author = book.author
+            book.author = " ".join([
+                w.lower() if w.lower() in PROTECTED_PARTICLES else w.capitalize() 
+                for w in book.author.strip().split()
+            ])
+            log.action_taken = f"AI fixed Author '{old_author}' to '{book.author}' (respecting particles)."
+            changed = True
+        
+        if changed:
+            log.status = "AI-Fixed"  # This flags it so "Approve Batch" can see it!
+            log.agent_name = "Janitor_AI"       # Explicitly route attribution to the fixing agent
+            log.resolved_by = "Janitor_AI"     # Track accountability properly
+            log.updated_at = datetime.now()
+            
+            counts["fixed"] += 1
+            session.add(book)
+            session.add(log)
+            continue
+        
+        # 9.3.6 Anomaly Escalation Processing
+        if log.error_type == "page_count" and (not book.pages or book.pages == 0):
             log.status = "Research_Needed"
-            log.action_taken += " | Repair Agent: Manual intervention still required."
+            log.action_taken += " | AI: Page count missing, research required."
+            session.add(log)
 
-        session.add(log)
-
-    # 9.4 Commit and return the dictionary
     session.commit()
     return {
-    "status": "Cleanup Finished",
-    "results": {
-        "auto_fixed": counts["fixed"],
-        "user_fixes_verified": counts["resolved"],
-        "duplicates_removed": counts["deleted"]
+        "status": "Cleanup Finished",
+        "results": {
+            "auto_fixed": counts["fixed"],
+            "user_fixes_verified": counts["resolved"],
+            "duplicates_removed": counts["deleted"]
         }
     }
 
